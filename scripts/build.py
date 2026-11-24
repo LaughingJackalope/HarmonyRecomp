@@ -2412,6 +2412,222 @@ SDK_PATCHES += [
     ),
 ]
 
+# SDK change 39: invalid SPIR-V for rectangle lists without geometry shaders.
+#
+# The rectangle-list vertex shader fallback (HostVertexShaderType
+# kRectangleListAsTriangleStrip, used when the device has no geometry shaders,
+# e.g. Metal) ends its "not the last guest vertex" branch with a branch to the
+# main loop's continue block, then makeBeginElse() added a second branch to the
+# merge block in the same block ("Branch must appear in a block" in
+# spirv-val). Desktop drivers accepted it; SPIRV-Cross in MoltenVK rejected
+# the shader ("Trying to end a non-existing block"), so on macOS those draws
+# were dropped (#2 in the macOS fork). Backport of upstream main, which calls
+# MakeBeginElse(false) there.
+SDK_PATCHES += [
+    (
+        "src/graphics/pipeline/shader/spirv_translator.cpp",
+        "        builder_->createBranch(main_loop_continue_);\n"
+        "      }\n"
+        "      if_not_last_guest_vertex.makeBeginElse();\n",
+        "        builder_->createBranch(main_loop_continue_);\n"
+        "      }\n"
+        "      // The \"then\" block already branched to the loop continue block.\n"
+        "      if_not_last_guest_vertex.makeBeginElse(false);\n",
+    ),
+]
+
+# SDK change 40: the rectangle-list fallback copied gl_PerVertex into a local
+# array.
+#
+# Each loop iteration stored the whole gl_PerVertex output block into a
+# Function-storage gl_PerVertex[3]. Valid enough for desktop drivers, but
+# BuiltIn and ArrayStride are only valid in Input/Output storage, and
+# SPIRV-Cross (MSL) declares no gl_PerVertex struct, so Metal failed with
+# "use of undeclared identifier '_RESERVED_IDENTIFIER_FIXUP_gl_PerVertex'" and
+# the rectangle-list draws were dropped on macOS (#2 in the macOS fork).
+# Positions now go to a float4[3] and clip/cull distances to float[3] arrays,
+# as in upstream main (src/gpu/xenos/pipeline/shader/spirv_translator.cpp).
+SDK_PATCHES += [
+    (
+        "include/rex/graphics/pipeline/shader/spirv_translator.h",
+        "  // VS rectangle-list fallback only - gl_PerVertex[3].\n"
+        "  spv::Id var_main_rectangle_per_vertex_;\n",
+        "  // VS rectangle-list fallback only - float4[3] positions. Not gl_PerVertex[3]:\n"
+        "  // BuiltIn and ArrayStride are valid only in Input and Output storage, and\n"
+        "  // SPIRV-Cross (MSL) declares no gl_PerVertex struct to make an array of.\n"
+        "  spv::Id var_main_rectangle_per_vertex_;\n"
+        "  static constexpr uint32_t kMaxRectanglePerVertexDistances = 8;\n"
+        "  // VS rectangle-list fallback only - float[3] per clip / cull distance.\n"
+        "  std::array<spv::Id, kMaxRectanglePerVertexDistances> var_main_rectangle_clip_distances_;\n"
+        "  std::array<spv::Id, kMaxRectanglePerVertexDistances> var_main_rectangle_cull_distances_;\n",
+    ),
+    (
+        "src/graphics/pipeline/shader/spirv_translator.cpp",
+        "  var_main_rectangle_per_vertex_ = spv::NoResult;\n"
+        "  std::fill(var_main_rectangle_interpolators_.begin(), var_main_rectangle_interpolators_.end(),\n",
+        "  var_main_rectangle_per_vertex_ = spv::NoResult;\n"
+        "  var_main_rectangle_clip_distances_.fill(spv::NoResult);\n"
+        "  var_main_rectangle_cull_distances_.fill(spv::NoResult);\n"
+        "  std::fill(var_main_rectangle_interpolators_.begin(), var_main_rectangle_interpolators_.end(),\n",
+    ),
+    (
+        "src/graphics/pipeline/shader/spirv_translator.cpp",
+        "      spv::Id type_rectangle_per_vertex_array =\n"
+        "          builder_->makeArrayType(type_output_per_vertex_, builder_->makeUintConstant(3), 0);\n"
+        "      var_main_rectangle_per_vertex_ =\n"
+        "          builder_->createVariable(spv::NoPrecision, spv::StorageClassFunction,\n"
+        "                                   type_rectangle_per_vertex_array, \"xe_var_rectangle_per_vertex\");\n",
+        "      spv::Id type_rectangle_per_vertex_array =\n"
+        "          builder_->makeArrayType(type_float4_, builder_->makeUintConstant(3), 0);\n"
+        "      var_main_rectangle_per_vertex_ =\n"
+        "          builder_->createVariable(spv::NoPrecision, spv::StorageClassFunction,\n"
+        "                                   type_rectangle_per_vertex_array, \"xe_var_rectangle_per_vertex\");\n"
+        "      {\n"
+        "        Modification rectangle_modification = GetSpirvShaderModification();\n"
+        "        spv::Id type_rectangle_distance_array =\n"
+        "            builder_->makeArrayType(type_float_, builder_->makeUintConstant(3), 0);\n"
+        "        uint32_t rectangle_clip_count = std::min(rectangle_modification.GetVertexClipDistanceCount(),\n"
+        "                                                 kMaxRectanglePerVertexDistances);\n"
+        "        for (uint32_t i = 0; i < rectangle_clip_count; ++i) {\n"
+        "          var_main_rectangle_clip_distances_[i] = builder_->createVariable(\n"
+        "              spv::NoPrecision, spv::StorageClassFunction, type_rectangle_distance_array,\n"
+        "              fmt::format(\"xe_var_rectangle_clip_distance_{}\", i).c_str());\n"
+        "        }\n"
+        "        uint32_t rectangle_cull_count = std::min(rectangle_modification.GetVertexCullDistanceCount(),\n"
+        "                                                 kMaxRectanglePerVertexDistances);\n"
+        "        for (uint32_t i = 0; i < rectangle_cull_count; ++i) {\n"
+        "          var_main_rectangle_cull_distances_[i] = builder_->createVariable(\n"
+        "              spv::NoPrecision, spv::StorageClassFunction, type_rectangle_distance_array,\n"
+        "              fmt::format(\"xe_var_rectangle_cull_distance_{}\", i).c_str());\n"
+        "        }\n"
+        "      }\n",
+    ),
+    (
+        "src/graphics/pipeline/shader/spirv_translator.cpp",
+        "      id_vector_temp_.clear();\n"
+        "      id_vector_temp_.push_back(rectangle_guest_vertex_index_int);\n"
+        "      builder_->createStore(\n"
+        "          builder_->createLoad(output_per_vertex_, spv::NoPrecision),\n"
+        "          builder_->createAccessChain(spv::StorageClassFunction, var_main_rectangle_per_vertex_,\n"
+        "                                      id_vector_temp_));\n",
+        "      id_vector_temp_.clear();\n"
+        "      id_vector_temp_.push_back(builder_->makeIntConstant(kOutputPerVertexMemberPosition));\n"
+        "      spv::Id rectangle_vertex_position = builder_->createLoad(\n"
+        "          builder_->createAccessChain(spv::StorageClassOutput, output_per_vertex_, id_vector_temp_),\n"
+        "          spv::NoPrecision);\n"
+        "      id_vector_temp_.clear();\n"
+        "      id_vector_temp_.push_back(rectangle_guest_vertex_index_int);\n"
+        "      builder_->createStore(\n"
+        "          rectangle_vertex_position,\n"
+        "          builder_->createAccessChain(spv::StorageClassFunction, var_main_rectangle_per_vertex_,\n"
+        "                                      id_vector_temp_));\n"
+        "      auto store_rectangle_distances =\n"
+        "          [this, rectangle_guest_vertex_index_int](\n"
+        "              uint32_t member_index, uint32_t component_count,\n"
+        "              const std::array<spv::Id, kMaxRectanglePerVertexDistances>& variables) {\n"
+        "            component_count = std::min(component_count, kMaxRectanglePerVertexDistances);\n"
+        "            for (uint32_t i = 0; i < component_count; ++i) {\n"
+        "              id_vector_temp_.clear();\n"
+        "              id_vector_temp_.push_back(builder_->makeIntConstant(int(member_index)));\n"
+        "              id_vector_temp_.push_back(builder_->makeIntConstant(int(i)));\n"
+        "              spv::Id value = builder_->createLoad(\n"
+        "                  builder_->createAccessChain(spv::StorageClassOutput, output_per_vertex_,\n"
+        "                                              id_vector_temp_),\n"
+        "                  spv::NoPrecision);\n"
+        "              id_vector_temp_.clear();\n"
+        "              id_vector_temp_.push_back(rectangle_guest_vertex_index_int);\n"
+        "              builder_->createStore(\n"
+        "                  value, builder_->createAccessChain(spv::StorageClassFunction, variables[i],\n"
+        "                                                     id_vector_temp_));\n"
+        "            }\n"
+        "          };\n"
+        "      if (clip_distance_count && output_per_vertex_member_clip_distance_ != UINT32_MAX) {\n"
+        "        store_rectangle_distances(output_per_vertex_member_clip_distance_, clip_distance_count,\n"
+        "                                  var_main_rectangle_clip_distances_);\n"
+        "      }\n"
+        "      if (cull_distance_count && output_per_vertex_member_cull_distance_ != UINT32_MAX) {\n"
+        "        store_rectangle_distances(output_per_vertex_member_cull_distance_, cull_distance_count,\n"
+        "                                  var_main_rectangle_cull_distances_);\n"
+        "      }\n",
+    ),
+    (
+        "src/graphics/pipeline/shader/spirv_translator.cpp",
+        "          id_vector_temp_.clear();\n"
+        "          id_vector_temp_.push_back(vertex_index);\n"
+        "          id_vector_temp_.push_back(builder_->makeIntConstant(kOutputPerVertexMemberPosition));\n"
+        "          id_vector_temp_.push_back(builder_->makeIntConstant(int(component)));\n",
+        "          id_vector_temp_.clear();\n"
+        "          id_vector_temp_.push_back(vertex_index);\n"
+        "          id_vector_temp_.push_back(builder_->makeIntConstant(int(component)));\n",
+    ),
+    (
+        "src/graphics/pipeline/shader/spirv_translator.cpp",
+        "        auto load_rectangle_per_vertex_component =\n"
+        "            [this](spv::Id vertex_index, uint32_t member_index, spv::Id component_index) {\n"
+        "              id_vector_temp_.clear();\n"
+        "              id_vector_temp_.push_back(vertex_index);\n"
+        "              id_vector_temp_.push_back(builder_->makeIntConstant(int(member_index)));\n"
+        "              if (component_index != spv::NoResult) {\n"
+        "                id_vector_temp_.push_back(component_index);\n"
+        "              }\n"
+        "              return builder_->createLoad(\n"
+        "                  builder_->createAccessChain(spv::StorageClassFunction,\n"
+        "                                              var_main_rectangle_per_vertex_, id_vector_temp_),\n"
+        "                  spv::NoPrecision);\n"
+        "            };\n",
+        "        auto load_rectangle_per_vertex_component = [this](spv::Id vertex_index,\n"
+        "                                                          uint32_t member_index,\n"
+        "                                                          uint32_t component) {\n"
+        "          spv::Id variable = var_main_rectangle_per_vertex_;\n"
+        "          if (member_index != kOutputPerVertexMemberPosition) {\n"
+        "            variable = member_index == output_per_vertex_member_clip_distance_\n"
+        "                           ? var_main_rectangle_clip_distances_[component]\n"
+        "                           : var_main_rectangle_cull_distances_[component];\n"
+        "          }\n"
+        "          id_vector_temp_.clear();\n"
+        "          id_vector_temp_.push_back(vertex_index);\n"
+        "          return builder_->createLoad(\n"
+        "              builder_->createAccessChain(spv::StorageClassFunction, variable, id_vector_temp_),\n"
+        "              spv::NoPrecision);\n"
+        "        };\n",
+    ),
+    (
+        "src/graphics/pipeline/shader/spirv_translator.cpp",
+        "        spv::Id position_0 = load_rectangle_per_vertex_component(\n"
+        "            rectangle_vertex_indices[0], kOutputPerVertexMemberPosition, spv::NoResult);\n"
+        "        spv::Id position_1 = load_rectangle_per_vertex_component(\n"
+        "            rectangle_vertex_indices[1], kOutputPerVertexMemberPosition, spv::NoResult);\n"
+        "        spv::Id position_2 = load_rectangle_per_vertex_component(\n"
+        "            rectangle_vertex_indices[2], kOutputPerVertexMemberPosition, spv::NoResult);\n",
+        "        spv::Id position_0 = load_rectangle_per_vertex_component(\n"
+        "            rectangle_vertex_indices[0], kOutputPerVertexMemberPosition, 0);\n"
+        "        spv::Id position_1 = load_rectangle_per_vertex_component(\n"
+        "            rectangle_vertex_indices[1], kOutputPerVertexMemberPosition, 0);\n"
+        "        spv::Id position_2 = load_rectangle_per_vertex_component(\n"
+        "            rectangle_vertex_indices[2], kOutputPerVertexMemberPosition, 0);\n",
+    ),
+    (
+        "src/graphics/pipeline/shader/spirv_translator.cpp",
+        "              for (uint32_t i = 0; i < component_count; ++i) {\n"
+        "                spv::Id component_index = builder_->makeIntConstant(int(i));\n"
+        "                spv::Id value_0 = load_rectangle_per_vertex_component(\n"
+        "                    rectangle_vertex_indices[0], member_index, component_index);\n"
+        "                spv::Id value_1 = load_rectangle_per_vertex_component(\n"
+        "                    rectangle_vertex_indices[1], member_index, component_index);\n"
+        "                spv::Id value_2 = load_rectangle_per_vertex_component(\n"
+        "                    rectangle_vertex_indices[2], member_index, component_index);\n",
+        "              component_count = std::min(component_count, kMaxRectanglePerVertexDistances);\n"
+        "              for (uint32_t i = 0; i < component_count; ++i) {\n"
+        "                spv::Id component_index = builder_->makeIntConstant(int(i));\n"
+        "                spv::Id value_0 =\n"
+        "                    load_rectangle_per_vertex_component(rectangle_vertex_indices[0], member_index, i);\n"
+        "                spv::Id value_1 =\n"
+        "                    load_rectangle_per_vertex_component(rectangle_vertex_indices[1], member_index, i);\n"
+        "                spv::Id value_2 =\n"
+        "                    load_rectangle_per_vertex_component(rectangle_vertex_indices[2], member_index, i);\n",
+    ),
+]
+
 
 def sdk_patch_hash() -> str:
     h = hashlib.sha256()
