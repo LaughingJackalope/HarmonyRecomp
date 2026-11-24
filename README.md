@@ -65,6 +65,16 @@ Needs glibc 2.39 or newer (SteamOS 3.6+, Arch, Fedora 40+, Ubuntu 24.04+) and a 
 
 The Windows build also runs under Proton; since v0.6.0 online play works there too (the game's port 1000 is mapped to UDP 49000, which Linux allows without root).
 
+### macOS (Apple Silicon, experimental)
+
+Native arm64 build through ReXGlue's macOS support (MoltenVK). Tested on an M2: full speed (60 FPS) windowed and fullscreen, controller, sound and saves. Progress and known gaps: [macOS tracking issue](https://github.com/LaughingJackalope/HarmonyRecomp/issues/1).
+
+1. `brew install cmake ninja vulkan-loader molten-vk` (Apple's Command Line Tools provide the compiler).
+2. Put your game file into `game/` and run `python3 scripts/build.py`. The game is in `out/build/mac-arm64-release/` (`./harmonyrecomp`).
+3. Optional: `python3 scripts/package_macos.py` wraps it into `dist/HarmonyRecomp.app` and a zip with install notes, for your other Macs. **That app contains the game: keep it private, never share it.**
+
+Ctrl+Cmd+F toggles fullscreen (macOS takes F11). Inside the app, settings and logs are in `~/Library/Application Support/HarmonyRecomp`; saves are in `~/.local/share/harmonyrecomp`. Not yet on macOS: button remapping, controller in the game's system dialogs.
+
 The rest of this page is for building by hand and for developers.
 
 ## Requirements

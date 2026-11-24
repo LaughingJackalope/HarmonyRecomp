@@ -56,6 +56,9 @@ class HarmonyrecompApp : public rex::ReXApp {
   // project's assets folder relative to the exe.
   void OnConfigurePaths(rex::PathConfig& paths) override {
     harmony::RaiseTimerResolution();
+#if defined(__APPLE__)
+    UseAppBundlePaths(paths);
+#endif
     config_path_ = paths.config_path;
     FindGameDataRoot(paths);
     // With title update 2 the game reads its updated files from the update:
@@ -69,6 +72,37 @@ class HarmonyrecompApp : public rex::ReXApp {
     }
   }
 
+#if defined(__APPLE__)
+  // Inside HarmonyRecomp.app (scripts/package_macos.py) nothing may be written
+  // into the bundle: that breaks its code signature, and /Applications may not
+  // be writable. Settings and logs go to ~/Library/Application Support/
+  // HarmonyRecomp; the first start copies the default settings from
+  // Contents/Resources. Saves stay in the SDK's user folder
+  // (~/.local/share/harmonyrecomp), as for a build run from out/.
+  void UseAppBundlePaths(rex::PathConfig& paths) {
+    const auto exe_dir = rex::filesystem::GetExecutableFolder();
+    const auto contents = exe_dir.parent_path();
+    if (exe_dir.filename() != "MacOS" || contents.filename() != "Contents" ||
+        contents.parent_path().extension() != ".app") {
+      return;
+    }
+    const char* home = std::getenv("HOME");
+    if (!home || !home[0]) {
+      return;
+    }
+    const auto support =
+        std::filesystem::path(home) / "Library" / "Application Support" / "HarmonyRecomp";
+    std::error_code ec;
+    std::filesystem::create_directories(support / "logs", ec);
+    const auto config = support / "harmonyrecomp.toml";
+    if (!std::filesystem::exists(config, ec)) {
+      std::filesystem::copy_file(contents / "Resources" / "harmonyrecomp.toml", config, ec);
+    }
+    paths.config_path = config;
+    rex::cvar::SetFlagByName("log_file", (support / "logs" / "harmonyrecomp.log").string());
+  }
+#endif
+
   void FindGameDataRoot(rex::PathConfig& paths) {
     if (!paths.game_data_root.empty()) {
       return;
@@ -79,6 +113,7 @@ class HarmonyrecompApp : public rex::ReXApp {
     }
     const auto exe_dir = rex::filesystem::GetExecutableFolder();
     candidates.push_back(exe_dir / "assets");
+    candidates.push_back(exe_dir / ".." / "Resources" / "assets");  // HarmonyRecomp.app
     candidates.push_back(exe_dir / ".." / ".." / ".." / "assets");  // out/build/<preset>/
     for (const auto& dir : candidates) {
       std::error_code ec;
