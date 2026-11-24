@@ -2391,6 +2391,27 @@ SDK_PATCHES += [
     ),
 ]
 
+# SDK change 38: no tearing on macOS by default.
+#
+# The presenter prefers VK_PRESENT_MODE_IMMEDIATE_KHR (lowest latency, VRR on
+# Windows). In macOS fullscreen the compositor is bypassed and immediate
+# presentation tears visibly. Default the setting to off on macOS so FIFO is
+# used; vulkan_allow_present_mode_immediate = true in the settings still wins.
+# Tested on an M2: no tearing, still 56-61 FPS.
+SDK_PATCHES += [
+    (
+        "src/ui/vulkan/vulkan_presenter.cpp",
+        "REXCVAR_DEFINE_BOOL(vulkan_allow_present_mode_immediate, true, \"UI/Vulkan\",\n",
+        "#if REX_PLATFORM_MAC\n"
+        "inline constexpr bool kAllowPresentModeImmediateDefault = false;\n"
+        "#else\n"
+        "inline constexpr bool kAllowPresentModeImmediateDefault = true;\n"
+        "#endif\n"
+        "REXCVAR_DEFINE_BOOL(vulkan_allow_present_mode_immediate, kAllowPresentModeImmediateDefault,\n"
+        "                    \"UI/Vulkan\",\n",
+    ),
+]
+
 
 def sdk_patch_hash() -> str:
     h = hashlib.sha256()

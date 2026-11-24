@@ -22,6 +22,9 @@
 #include <rex/rex_app.h>
 #include <rex/system/flags.h>
 #include <rex/ui/keybinds.h>
+#include <rex/ui/ui_event.h>
+#include <rex/ui/window.h>
+#include <rex/ui/window_listener.h>
 
 
 #include "controller_remap.h"
@@ -151,6 +154,14 @@ class HarmonyrecompApp : public rex::ReXApp {
     rex::ui::RegisterBind("bind_fullscreen", "F11", "Toggle fullscreen", [this] {
       if (auto* w = window()) w->SetFullscreen(!w->IsFullscreen());
     });
+#if defined(__APPLE__)
+    // macOS takes F11 for itself (Show Desktop / media key): also accept the
+    // system's own fullscreen shortcut, Ctrl+Cmd+F.
+    if (auto* w = window()) {
+      mac_keys_.app = this;
+      w->AddInputListener(&mac_keys_, 0);
+    }
+#endif
     // 30/60 FPS for speedruns (glitches that need the console's frame drops).
     rex::ui::RegisterBind("bind_fps_30_60", "F7", "Switch frame rate limit 30/60", [] {
       const bool at_30 =
@@ -173,6 +184,9 @@ class HarmonyrecompApp : public rex::ReXApp {
     rex::ui::UnregisterBind("bind_graphics_menu");
     rex::ui::UnregisterBind("bind_fps_counter");
     rex::ui::UnregisterBind("bind_fullscreen");
+#if defined(__APPLE__)
+    if (auto* w = window()) w->RemoveInputListener(&mac_keys_);
+#endif
     rex::ui::UnregisterBind("bind_fps_30_60");
     graphics_menu_.reset();
     fps_counter_.reset();
@@ -246,6 +260,20 @@ class HarmonyrecompApp : public rex::ReXApp {
     auto* cp = gs ? gs->command_processor() : nullptr;
     return cp ? cp->swap_count() : 0;
   }
+
+#if defined(__APPLE__)
+  struct MacKeys final : rex::ui::WindowInputListener {
+    HarmonyrecompApp* app = nullptr;
+    void OnKeyDown(rex::ui::KeyEvent& e) override {
+      if (e.virtual_key() == rex::ui::VirtualKey::kF && e.is_ctrl_pressed() && e.is_super_pressed() &&
+          !e.prev_state()) {
+        if (auto* w = app->window()) w->SetFullscreen(!w->IsFullscreen());
+        e.set_handled(true);
+      }
+    }
+  };
+  MacKeys mac_keys_;
+#endif
 
   std::filesystem::path config_path_;
   bool title_update_ = false;
