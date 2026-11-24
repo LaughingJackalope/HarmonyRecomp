@@ -1758,18 +1758,19 @@ SDK_PATCHES += [
 # the game to ~15 FPS (reported on Reddit). Display-only dialogs (FPS counter,
 # frame times) are now drawn with the game's frames only; dialogs that take
 # input still repaint continuously so they react while the game waits.
-UNPORTED_PATCHES += [
+# Since df2743b the always-open achievement toast kept the dialog list from
+# ever being empty, so the UI thread repainted continuously all the time; on
+# macOS every repaint held the shared Vulkan queue while MoltenVK waited for a
+# drawable, and the game's GPU thread waited behind it.
+SDK_PATCHES += [
     (
         "src/ui/imgui_drawer.cpp",
         "  if (!dialogs_.empty()) {\n"
-        "    // Repaint (and handle input) continuously if still active.\n"
-        "    presenter_->RequestUIPaintFromUIThread();\n"
-        "  }\n",
+        "    // Repaint (and handle input) continuously if still active. In detached mode\n",
         "  if (mouse_dialog_count_.load() > 0) {\n"
         "    // Repaint (and handle input) continuously while a dialog takes input.\n"
-        "    // Display-only ones (FPS counter) are drawn with the game's frames.\n"
-        "    presenter_->RequestUIPaintFromUIThread();\n"
-        "  }\n",
+        "    // Display-only ones (FPS counter, achievement toast) are drawn with the\n"
+        "    // game's frames. In detached mode\n",
     ),
 ]
 
@@ -2322,6 +2323,71 @@ SDK_PATCHES += [
         "src/system/kernel_state.cpp",
         "#include <filesystem>\n",
         "#include <filesystem>\n\n#include <rex/filesystem.h>\n",
+    ),
+]
+
+# SDK change 36: a pipeline that failed to build was retried on every draw.
+#
+# VulkanPipelineCache erased a pipeline whose creation failed, so the next draw
+# with the same description went through shader translation and
+# vkCreateGraphicsPipelines again, and logged three lines. On macOS MoltenVK
+# rejects two of the game's vertex shaders (#2 in the macOS fork): ~600 failed
+# creations a second, on the GPU thread, plus ~25 MB of log a minute. Failed
+# descriptions are now remembered: tried and logged once, then the draw is
+# skipped as before.
+SDK_PATCHES += [
+    (
+        "include/rex/graphics/vulkan/pipeline_cache.h",
+        "  std::unordered_map<PipelineDescription, Pipeline, PipelineDescription::Hasher> pipelines_;\n",
+        "  std::unordered_map<PipelineDescription, Pipeline, PipelineDescription::Hasher> pipelines_;\n"
+        "  // Descriptions whose pipeline could not be created; not retried.\n"
+        "  std::unordered_set<PipelineDescription, PipelineDescription::Hasher> failed_pipelines_;\n",
+    ),
+    (
+        "include/rex/graphics/vulkan/pipeline_cache.h",
+        "#include <unordered_map>\n",
+        "#include <unordered_map>\n#include <unordered_set>\n",
+    ),
+    (
+        "src/graphics/vulkan/pipeline_cache.cpp",
+        "  // Create the pipeline if not already existing.\n",
+        "  if (failed_pipelines_.contains(description)) {\n"
+        "    return false;\n"
+        "  }\n\n"
+        "  // Create the pipeline if not already existing.\n",
+    ),
+    (
+        "src/graphics/vulkan/pipeline_cache.cpp",
+        "  if (!queued_async_creation && !EnsurePipelineCreated(creation_arguments_real)) {\n"
+        "    pipelines_.erase(description);\n",
+        "  if (!queued_async_creation && !EnsurePipelineCreated(creation_arguments_real)) {\n"
+        "    pipelines_.erase(description);\n"
+        "    failed_pipelines_.insert(description);\n",
+    ),
+]
+
+# SDK change 37: the presenter rebuilt its output pipeline on every frame.
+#
+# VulkanPresenter compares the final effect pipeline's swapchain_format with
+# the render pass format to see whether it is outdated, but never recorded the
+# format, so it stayed VK_FORMAT_UNDEFINED: every paint waited for the GPU to
+# finish the previous frame, destroyed the pipeline and created it again. On
+# macOS (MoltenVK: SPIR-V to MSL plus a Metal pipeline compile per frame) that
+# was ~70% of the UI thread in fence waits and ~11% in pipeline creation, and
+# the frame rate swung between ~24 and ~41. Backport of the fix in upstream
+# main (src/gpu/xenos/host/vulkan/vulkan_presenter.cpp).
+SDK_PATCHES += [
+    (
+        "src/ui/vulkan/vulkan_presenter.cpp",
+        "            if (swapchain_effect_pipeline.swapchain_pipeline == VK_NULL_HANDLE) {\n"
+        "              guest_output_flow.effect_count = 0;\n"
+        "            }\n",
+        "            if (swapchain_effect_pipeline.swapchain_pipeline == VK_NULL_HANDLE) {\n"
+        "              guest_output_flow.effect_count = 0;\n"
+        "            } else {\n"
+        "              swapchain_effect_pipeline.swapchain_format =\n"
+        "                  paint_context_.swapchain_render_pass_format;\n"
+        "            }\n",
     ),
 ]
 
