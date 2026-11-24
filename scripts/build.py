@@ -100,7 +100,7 @@ def git(*args) -> list:
 def platform_id() -> str:
     os_name = platform.system()
     arch = platform.machine().lower()
-    os_id = {"Windows": "win", "Linux": "linux"}.get(os_name)
+    os_id = {"Windows": "win", "Linux": "linux", "Darwin": "mac"}.get(os_name)
     if os_id is None:
         sys.exit(f"error: unsupported OS {os_name}")
     if arch in ("x86_64", "amd64"):
@@ -515,61 +515,15 @@ def resolve_symlink_placeholders(repo: Path) -> int:
 # A fourth element OPTIONAL marks a patch that is skipped when it does not fit.
 OPTIONAL = "optional"
 
-SDK_PATCHES = [
-    # 1) The block scanner honours [[switch_tables]] from the project config.
-    #    Without this, a jump table with no bounds check (sub_8277ECF0 in this
-    #    game) is read for up to max_jump_table_entries entries and the
-    #    function swallows its neighbour, which then fails to compile with
-    #    "use of undeclared label".
-    (
-        "include/rex/codegen/function_scanner.h",
-        """                                    const std::unordered_set<uint32_t>& knownFunctions,
-                                    uint32_t pdataSize = 0);""",
-        """                                    const std::unordered_set<uint32_t>& knownFunctions,
-                                    uint32_t pdataSize = 0,
-                                    const std::unordered_map<uint32_t, JumpTable>*
-                                        manualSwitchTables = nullptr);""",
-    ),
-    (
-        "include/rex/codegen/function_scanner.h",
-        "#include <unordered_set>\n",
-        "#include <unordered_map>\n#include <unordered_set>\n",
-    ),
-    (
-        "src/codegen/function_scanner.cpp",
-        """                                    const std::unordered_set<uint32_t>& knownFunctions,
-                                    uint32_t pdataSize) {""",
-        """                                    const std::unordered_set<uint32_t>& knownFunctions,
-                                    uint32_t pdataSize,
-                                    const std::unordered_map<uint32_t, JumpTable>*
-                                        manualSwitchTables) {""",
-    ),
-    (
-        "src/codegen/function_scanner.cpp",
-        """          auto jt = detectJumpTable(decoded, addr, containingRegion, entryPoint, funcEnd);""",
-        """          // A [[switch_tables]] entry from the project config overrides the
-          // heuristic. Tables without a bounds check otherwise read up to
-          // max_jump_table_entries bytes and can swallow the next function.
-          std::optional<JumpTable> jt;
-          if (manualSwitchTables) {
-            auto manual = manualSwitchTables->find(addr);
-            if (manual != manualSwitchTables->end()) {
-              jt = manual->second;
-              REXCODEGEN_TRACE("discoverBlocks: bctr at 0x{:08X} uses config switch table ({} targets)",
-                               addr, jt->targets.size());
-            }
-          }
-          if (!jt) {
-            jt = detectJumpTable(decoded, addr, containingRegion, entryPoint, funcEnd);
-          }""",
-    ),
-    (
-        "src/codegen/phase_discover.cpp",
-        "  auto result = discoverBlocks(decoded, funcAddr, *region, knownFunctions, pdataSize);",
-        "  auto result = discoverBlocks(decoded, funcAddr, *region, knownFunctions, pdataSize,\n"
-        "                               &ctx.Config().switchTables);",
-    ),
-]
+# Changes written for the SDK before df2743b that are not ported yet: the
+# input system became per-device (InputDriver::GetDeviceState, DeviceId) and
+# the GTK window was replaced by an SDL one. Kept for reference, not applied.
+UNPORTED_PATCHES = []
+
+SDK_PATCHES = []
+# SDK change 1 ([[switch_tables]] honoured by the block scanner, needed for the
+# unbounded jump table in sub_8277ECF0) is part of the SDK since the macOS
+# support commit df2743b (discoverBlocks takes manualSwitchTables).
 # SDK change 2: relocatable indirect-call table.
 #
 # The dispatch table of a module always sat right after its image
@@ -718,35 +672,18 @@ SDK_PATCHES += [
     ),
 ]
 
-# SDK change 3: XamShowMessageBoxUI read title and text without byte-swapping.
-# Guest UTF-16 is big-endian, so "S" (0x0053) arrived as 0x5300, a CJK glyph
-# missing from the overlay font, and the save prompts showed only "?". The
-# buttons already used load_and_swap and were fine. Also log the text so we
-# can see what the game asks.
+# SDK change 3: XamShowMessageBoxUI read title and text without byte-swapping
+# (the save prompts showed only "?"). The SDK decodes both itself since
+# df2743b; what is left here is logging the text so we can see what the game
+# asks.
 SDK_PATCHES += [
     (
         "src/kernel/xam/xam_ui.cpp",
-        "    title = rex::string::to_utf8(title_ptr.value());\n",
-        "    // Guest strings are big-endian UTF-16; value() returns them unswapped.\n"
-        "    title = rex::string::to_utf8(rex::memory::load_and_swap<std::u16string>(\n"
-        "        REX_KERNEL_MEMORY()->TranslateVirtual(title_ptr.guest_address())));\n",
-    ),
-    (
-        "src/kernel/xam/xam_ui.cpp",
-        "  std::vector<std::string> buttons;\n",
-        "  std::string text;\n"
-        "  if (text_ptr) {\n"
-        "    text = rex::string::to_utf8(rex::memory::load_and_swap<std::u16string>(\n"
-        "        REX_KERNEL_MEMORY()->TranslateVirtual(text_ptr.guest_address())));\n"
-        "  }\n"
-        "  REXKRNL_INFO(\"XamShowMessageBoxUI: title=\\\"{}\\\" text=\\\"{}\\\"\", title, text);\n"
+        "                             : \"\";\n\n  std::vector<std::string> buttons;\n",
+        "                             : \"\";\n"
+        "  REXKRNL_INFO(\"XamShowMessageBoxUI: title=\\\"{}\\\" text=\\\"{}\\\"\", title, text_str);\n"
         "\n"
         "  std::vector<std::string> buttons;\n",
-    ),
-    (
-        "src/kernel/xam/xam_ui.cpp",
-        "new MessageBoxDialog(imgui_drawer, title, rex::string::to_utf8(text_ptr.value()), buttons,",
-        "new MessageBoxDialog(imgui_drawer, title, text, buttons,",
     ),
 ]
 
@@ -835,16 +772,17 @@ SDK_PATCHES += [
         "        uint32_t table_base = 0;\n"
         "        using TableBaseFn = uint32_t (*)();\n"
         "        if (auto table_base_func = reinterpret_cast<TableBaseFn>(\n"
-        "                library_local.GetSymbol(\"ReXModule_TableBase\"))) {\n"
+        "                library_local.GetRawSymbol(\"ReXModule_TableBase\"))) {\n"
         "          table_base = table_base_func();\n"
         "        }\n"
         "        auto* xex = module->xex_module();\n",
     ),
     (
         "src/system/kernel_state.cpp",
-        "text->address, text->size, xex->base_address(), xex->image_size())) {",
-        "text->address, text->size, xex->base_address(), xex->image_size(),\n"
-        "                       /*is_entrypoint=*/false, table_base)) {",
+        "                       image_info->image_size)) {\n"
+        "          REXSYS_ERROR(\"InitializeFunctionTable failed for module",
+        "                       image_info->image_size, /*is_entrypoint=*/false, table_base)) {\n"
+        "          REXSYS_ERROR(\"InitializeFunctionTable failed for module",
     ),
 ]
 
@@ -969,9 +907,9 @@ SDK_PATCHES += [
     ),
     (
         "src/codegen/project_recompiler.cpp",
-        "                     userMod->xex_module()->base_address());\n"
+        "    ReportBinaryInfo(opts.reporter, dll_display_name, *userMod->xex_module());\n"
         "    dllModules.push_back(std::move(userMod));\n",
-        "                     userMod->xex_module()->base_address());\n"
+        "    ReportBinaryInfo(opts.reporter, dll_display_name, *userMod->xex_module());\n"
         "    dllViews.push_back(BinaryView::fromModule(*userMod->xex_module()));\n"
         "    runtime->kernel_state()->UnloadUserModule(userMod, /*call_entry=*/false);\n",
     ),
@@ -1084,27 +1022,9 @@ SDK_PATCHES += [
 ]
 
 
-# SDK change 9: title update patches in codegen on Windows.
-#
-# build.py turns on xex_apply_patches for codegen with REX_XEX_APPLY_PATCHES.
-# On Windows the cvar lives in rexruntime.dll while rexglue.exe applies the
-# environment to its own copy of the cvar registry, so the patch was never
-# applied there and codegen analysed version 1.04 with the 2.04 config. The
-# loader now also reads the variable itself (the game sets it too).
-SDK_PATCHES += [
-    (
-        "src/system/user_module.cpp",
-        "  if (REXCVAR_GET(xex_apply_patches)) {\n",
-        "  const char* apply_patches_env = std::getenv(\"REX_XEX_APPLY_PATCHES\");\n"
-        "  if (REXCVAR_GET(xex_apply_patches) ||\n"
-        "      (apply_patches_env && (apply_patches_env[0] == '1' || apply_patches_env[0] == 't'))) {\n",
-    ),
-    (
-        "src/system/user_module.cpp",
-        "#include <vector>\n",
-        "#include <cstdlib>\n#include <vector>\n",
-    ),
-]
+# SDK change 9 (title update patches during codegen on Windows) is gone: since
+# df2743b the loader always applies a sibling .xexp/.dllp, there is no
+# xex_apply_patches cvar any more.
 
 
 # SDK change 10: unloading a recompiled DLL never released it.
@@ -1216,8 +1136,8 @@ SDK_PATCHES += [
 SDK_PATCHES += [
     (
         "src/graphics/graphics_system.cpp",
-        'REXCVAR_DEFINE_STRING(trace_gpu_prefix, "", "GPU", "GPU trace file prefix");\n',
-        'REXCVAR_DEFINE_STRING(trace_gpu_prefix, "", "GPU", "GPU trace file prefix");\n'
+        '                    "runtime spikes and freezes when playing the game not for the first time.");\n',
+        '                    "runtime spikes and freezes when playing the game not for the first time.");\n'
         'REXCVAR_DEFINE_INT32(vsync_rate, 0, "GPU",\n'
         '                     "Frame rate limit in Hz while vsync is on (0 = the video mode\'s, 60)");\n',
     ),
@@ -1290,6 +1210,14 @@ SDK_PATCHES += [
         "include/rex/ui/overlay/debug_overlay.h",
         "  explicit DebugOverlayDialog(ImGuiDrawer* imgui_drawer, FrameStatsProvider stats_provider = {});\n",
         "  explicit DebugOverlayDialog(ImGuiDrawer* imgui_drawer, FrameStatsProvider stats_provider = {});\n"
+        "  bool WantsMouse() const override { return false; }\n",
+    ),
+    # The achievement toast (SDK since df2743b) stays open for the whole
+    # session; counted as wanting the mouse, it kept all input from the game.
+    (
+        "include/rex/ui/overlay/achievement_notification.h",
+        "  virtual void Push(const rex::system::AchievementEvent& event) = 0;\n",
+        "  virtual void Push(const rex::system::AchievementEvent& event) = 0;\n"
         "  bool WantsMouse() const override { return false; }\n",
     ),
     (
@@ -1377,7 +1305,7 @@ SDK_PATCHES += [
 # tabs. The controller is read through a separate path that does not change
 # what the game sees once the dialog closes. Message boxes also start on the
 # game's default button instead of the first one.
-SDK_PATCHES += [
+UNPORTED_PATCHES += [
     (
         "include/rex/input/input_driver.h",
         "  virtual void OnWindowAvailable(rex::ui::Window* /*window*/) {}\n",
@@ -1604,7 +1532,7 @@ SDK_PATCHES += [
 # The app can install a filter that rewrites each physical controller's state
 # before the game sees it. Keyboard/mouse emulation is not filtered: it has
 # its own key bindings.
-SDK_PATCHES += [
+UNPORTED_PATCHES += [
     (
         "include/rex/input/input_driver.h",
         "  void set_is_active_callback(std::function<bool()> is_active_callback) {\n",
@@ -1786,7 +1714,7 @@ SDK_PATCHES += [
 # Change 16 now ignores controller buttons that are already held when a dialog
 # opens. With the FPS counter off the drawer detaches between dialogs and its
 # draw loop stops, so the gamepad state is reset there too.
-SDK_PATCHES += [
+UNPORTED_PATCHES += [
     (
         "src/ui/imgui_drawer.cpp",
         "  // properties.\n  ClearInput();\n",
@@ -1830,7 +1758,7 @@ SDK_PATCHES += [
 # the game to ~15 FPS (reported on Reddit). Display-only dialogs (FPS counter,
 # frame times) are now drawn with the game's frames only; dialogs that take
 # input still repaint continuously so they react while the game waits.
-SDK_PATCHES += [
+UNPORTED_PATCHES += [
     (
         "src/ui/imgui_drawer.cpp",
         "  if (!dialogs_.empty()) {\n"
@@ -1859,7 +1787,7 @@ SDK_PATCHES += [
 # direction do not queue anything; the queue is short (8 entries, at most
 # 100 ms old) so lag stays small.
 SDL_INPUT_HISTORY = 8
-SDK_PATCHES += [
+UNPORTED_PATCHES += [
     (
         "include/rex/input/sdl/sdl_input_driver.h",
         "#include <atomic>\n",
@@ -1954,7 +1882,7 @@ SDK_PATCHES += [
 # Logitech XInput device and a virtual Xbox 360 pad). With merge_controllers
 # (default on) all controllers act as player 1 and players 2-4 report no
 # controller.
-SDK_PATCHES += [
+UNPORTED_PATCHES += [
     (
         "src/input/input_system.cpp",
         "REXCVAR_DEFINE_BOOL(guide_button, false, \"Input\", \"Enable guide button pass-through\");\n",
@@ -2092,8 +2020,8 @@ SDK_PATCHES += [
 SDK_PATCHES += [
     (
         "src/ui/imgui_drawer.cpp",
-        "  // properties.\n  ClearInput();\n  gamepad_fed_ = false;\n}\n",
-        "  // properties.\n  ClearInput();\n  gamepad_fed_ = false;\n"
+        "  // properties.\n  ClearInput();\n}\n",
+        "  // properties.\n  ClearInput();\n"
         "  // No dialog is left to take input; Draw() no longer runs to say so.\n"
         "  mouse_dialog_count_ = 0;\n}\n",
     ),
@@ -2141,7 +2069,7 @@ SDK_PATCHES += [
 # toolchain download brings a sysroot and the GTK flags precomputed
 # (scripts/make_sysroot.sh). build.py passes them as GTK3_* cache variables;
 # pkg-config is only asked when they are not given.
-SDK_PATCHES += [
+UNPORTED_PATCHES += [
     (
         "cmake/rexglue_helpers.cmake",
         "        find_package(PkgConfig REQUIRED)\n"
@@ -2161,7 +2089,7 @@ SDK_PATCHES += [
 # counting until the next frame drew windows - change 26 fixed this for the
 # last window, this does it for every one. Also logged now: when input to the
 # game switches off and on, and focus changes, to see the cause in a log.
-SDK_PATCHES += [
+UNPORTED_PATCHES += [
     (
         "src/ui/imgui_drawer.cpp",
         "  REXLOG_INFO(\"ImGui dialog closed ({} open)\", dialogs_.size());\n"
@@ -2301,7 +2229,7 @@ SDK_PATCHES += [
 # overlays lagged behind the input, and the exit question could not be
 # answered (Steam Deck). The request now goes through g_idle_add, which may be
 # called from any thread and wakes the main loop.
-SDK_PATCHES += [
+UNPORTED_PATCHES += [
     (
         "src/ui/window_gtk.cpp",
         "void GTKWindow::RequestPaintImpl() {\n  gtk_widget_queue_draw(drawing_area_);\n}\n",
@@ -2330,7 +2258,7 @@ SDK_PATCHES += [
 # second; each time the game lost and got back the controller, which left it
 # with stuck or missing input. GTK key events now say whether the key was
 # already down (as on Windows), and the binds ignore repeats.
-SDK_PATCHES += [
+UNPORTED_PATCHES += [
     (
         "src/ui/window_gtk.cpp",
         "#include <algorithm>\n#include <string>\n",
@@ -2360,6 +2288,40 @@ SDK_PATCHES += [
         "  }\n"
         "  rex::ui::ProcessKeyEvent(e);\n"
         "}\n",
+    ),
+]
+
+# SDK change 35: recompiled DLL modules did not load on Linux and macOS.
+#
+# df2743b loads a module's library with dlopen(shared_lib_name), the bare name
+# ("harmonyrecomp_dllAlucard"): no folder, no lib prefix, no .so/.dylib. dlopen
+# finds nothing, so picking a character froze the game at "Loading"
+# ("Failed to load shared library for module 'dllalucard.dll'"). Windows
+# appends .dll itself. Build the full path next to the executable, as the SDK
+# did before (SharedLibrary) and does again later (LoadNamed).
+SDK_PATCHES += [
+    (
+        "src/system/kernel_state.cpp",
+        "    if (!library_local.Load(std::filesystem::path(recomp->shared_lib_name),\n",
+        "#if REX_PLATFORM_WIN32\n"
+        "    const std::string lib_file = recomp->shared_lib_name + \".dll\";\n"
+        "#elif REX_PLATFORM_MAC\n"
+        "    const std::string lib_file = \"lib\" + recomp->shared_lib_name + \".dylib\";\n"
+        "#else\n"
+        "    const std::string lib_file = \"lib\" + recomp->shared_lib_name + \".so\";\n"
+        "#endif\n"
+        "    if (!library_local.Load(rex::filesystem::GetExecutableFolder() / lib_file,\n",
+    ),
+    (
+        "src/system/kernel_state.cpp",
+        "      REXSYS_ERROR(\"Failed to load shared library for module '{}'\", recomp->pe_name);\n",
+        "      REXSYS_ERROR(\"Failed to load shared library for module '{}' ({})\", recomp->pe_name,\n"
+        "                   (rex::filesystem::GetExecutableFolder() / lib_file).string());\n",
+    ),
+    (
+        "src/system/kernel_state.cpp",
+        "#include <filesystem>\n",
+        "#include <filesystem>\n\n#include <rex/filesystem.h>\n",
     ),
 ]
 
@@ -2478,7 +2440,12 @@ def step_build_sdk(pid: str, config: str) -> Path:
         print("[3/5] Building and installing the ReXGlue SDK (this takes a while)")
     # The SDK uses one multi-config configure preset per platform (e.g.
     # "win-amd64") plus build presets "<platform>-<config>".
-    run(["cmake", "--preset", pid], cwd=SDK_DIR)
+    configure = ["cmake", "--preset", pid]
+    if platform.system() == "Darwin":
+        # The SDK's mac presets take "clang" from PATH, which may be another
+        # toolchain (e.g. swiftly's); Apple's own Clang is the one CI uses.
+        configure += ["-DCMAKE_C_COMPILER=/usr/bin/clang", "-DCMAKE_CXX_COMPILER=/usr/bin/clang++"]
+    run(configure, cwd=SDK_DIR)
     reembed_codegen_templates(build_dir)
     run(["cmake", "--build", "--preset", f"{pid}-{config.lower()}"], cwd=SDK_DIR)
     run(["cmake", "--install", f"out/build/{pid}", "--config", config], cwd=SDK_DIR)

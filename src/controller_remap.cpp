@@ -144,13 +144,28 @@ void ResetControllerRemap() {
   ReloadControllerRemap();
 }
 
+// SetGamepadFilter comes from SDK change 17, which is not ported to the
+// per-device input system of df2743b yet: without it, remapping is off.
+template <typename Input>
+bool InstallFilter(Input* input) {
+  if constexpr (requires { input->SetGamepadFilter(&Filter); }) {
+    input->SetGamepadFilter(&Filter);
+    return true;
+  } else {
+    return false;
+  }
+}
+
 void InstallControllerRemap(rex::Runtime* runtime) {
   ReloadControllerRemap();
   auto* input = runtime ? static_cast<rex::input::InputSystem*>(runtime->input_system()) : nullptr;
   if (!input) {
     return;
   }
-  input->SetGamepadFilter(&Filter);
+  if (!InstallFilter(input)) {
+    REXLOG_WARN("Controller remapping is not available with this SDK (remap_* ignored)");
+    return;
+  }
   if (!g_identity) {
     REXLOG_INFO("Controller buttons remapped (remap_* settings)");
   }

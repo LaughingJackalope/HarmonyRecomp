@@ -90,19 +90,16 @@ class HarmonyrecompApp : public rex::ReXApp {
   }
 
   // A title update applied at build time leaves default.xexp and *.dllp next
-  // to the binaries; the recompiled code was generated from the patched
-  // modules, so the runtime must apply the same patches when it loads them.
-  // Without a title update there is no patch file and nothing changes.
-  void OnLoadXexImage(std::string& xex_image) override {
-    (void)xex_image;
-    REXCVAR_SET(xex_apply_patches, true);
-    // The loader also reads this (SDK change 9): the cvar set here may be a
-    // different copy than the one rexruntime.dll checks.
-#ifdef _WIN32
-    _putenv_s("REX_XEX_APPLY_PATCHES", "1");
-#else
-    setenv("REX_XEX_APPLY_PATCHES", "1", 1);
-#endif
+  // to the binaries; the SDK's loader applies them by itself (the recompiled
+  // code was generated from the patched modules).
+
+  // Since df2743b the GPU emulation is a plugin next to the executable
+  // (librexgpu-xenos, staged by GPU_PLUGINS in CMakeLists.txt); without one
+  // the game runs without a picture. gpu_plugin in the settings still wins.
+  void OnPreSetup(rex::RuntimeConfig& config) override {
+    if (config.gpu_plugin.empty()) {
+      config.gpu_plugin = "xenos";
+    }
   }
 
   // Runtime and kernel exist now; start the LAN lobby service if netplay is on.

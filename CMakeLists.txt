@@ -40,7 +40,7 @@ else()
     add_executable(harmonyrecomp ${HARMONYRECOMP_SOURCES})
 endif()
 
-rexglue_setup_target(harmonyrecomp)
+rexglue_setup_target(harmonyrecomp GPU_PLUGINS xenos)
 
 # Netplay lobby service (src/netplay/udp.cpp): Winsock and adapter enumeration;
 # winmm for the 1 ms timer resolution (harmonyrecomp_app.h).
