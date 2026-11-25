@@ -1305,7 +1305,11 @@ SDK_PATCHES += [
 # tabs. The controller is read through a separate path that does not change
 # what the game sees once the dialog closes. Message boxes also start on the
 # game's default button instead of the first one.
-UNPORTED_PATCHES += [
+SDK_PATCHES += [
+    # Ported to the per-device input system of df2743b: drivers report
+    # devices (GetDeviceState(DeviceId)); the UI path asks each driver for its
+    # devices itself, so it never touches InputSystem's device list, which the
+    # game's threads refresh.
     (
         "include/rex/input/input_driver.h",
         "  virtual void OnWindowAvailable(rex::ui::Window* /*window*/) {}\n",
@@ -1313,7 +1317,7 @@ UNPORTED_PATCHES += [
         "\n"
         "  // Controller state for the SDK's own dialogs: read even while the game's\n"
         "  // input is paused, without changing what the game sees afterwards.\n"
-        "  virtual X_RESULT GetStateForUI(uint32_t /*user_index*/, X_INPUT_STATE* /*out_state*/) {\n"
+        "  virtual X_RESULT GetDeviceStateForUI(DeviceId /*id*/, X_INPUT_STATE* /*out_state*/) {\n"
         "    return X_ERROR_DEVICE_NOT_CONNECTED;\n"
         "  }\n",
     ),
@@ -1321,61 +1325,68 @@ UNPORTED_PATCHES += [
         "include/rex/input/sdl/sdl_input_driver.h",
         "  void OnWindowAvailable(rex::ui::Window* window) override;\n",
         "  void OnWindowAvailable(rex::ui::Window* window) override;\n"
-        "  X_RESULT GetStateForUI(uint32_t user_index, X_INPUT_STATE* out_state) override;\n",
+        "  X_RESULT GetDeviceStateForUI(DeviceId id, X_INPUT_STATE* out_state) override;\n",
     ),
     (
         "src/input/sdl/sdl_input_driver.cpp",
-        "X_RESULT SDLInputDriver::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {\n",
-        "X_RESULT SDLInputDriver::GetStateForUI(uint32_t user_index, X_INPUT_STATE* out_state) {\n"
-        "  if (!sdl_events_initialized_ || !SDL_Gamepad_initialized_ ||\n"
-        "      user_index >= HID_SDL_USER_COUNT) {\n"
+        "X_RESULT SDLInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {\n",
+        "X_RESULT SDLInputDriver::GetDeviceStateForUI(DeviceId id, X_INPUT_STATE* out_state) {\n"
+        "  if (!sdl_events_initialized_ || !SDL_Gamepad_initialized_) {\n"
         "    return X_ERROR_DEVICE_NOT_CONNECTED;\n"
         "  }\n"
         "  QueueControllerUpdate();\n"
         "  auto guard = DrainAndLock();\n"
-        "  auto controller = GetControllerState(user_index);\n"
+        "  auto controller = FindController(id);\n"
         "  if (!controller) {\n"
         "    return X_ERROR_DEVICE_NOT_CONNECTED;\n"
         "  }\n"
-        "  // Leave packet_number/state_changed alone: they belong to the game.\n"
+        "  // Leave packet_number/state_changed/is_active alone: they belong to the game.\n"
         "  std::memcpy(out_state, &controller->state, sizeof(*out_state));\n"
         "  return X_ERROR_SUCCESS;\n"
         "}\n"
         "\n"
-        "X_RESULT SDLInputDriver::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {\n",
+        "X_RESULT SDLInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {\n",
     ),
     (
         "include/rex/input/xinput/xinput_input_driver.h",
-        "  X_RESULT GetState(uint32_t user_index, X_INPUT_STATE* out_state) override;\n",
-        "  X_RESULT GetState(uint32_t user_index, X_INPUT_STATE* out_state) override;\n"
-        "  X_RESULT GetStateForUI(uint32_t user_index, X_INPUT_STATE* out_state) override {\n"
-        "    return GetState(user_index, out_state);\n"
+        "  X_RESULT GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) override;\n",
+        "  X_RESULT GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) override;\n"
+        "  X_RESULT GetDeviceStateForUI(DeviceId id, X_INPUT_STATE* out_state) override {\n"
+        "    return GetDeviceState(id, out_state);\n"
         "  }\n",
     ),
     (
         "include/rex/input/input_system.h",
         "  X_RESULT GetState(uint32_t user_index, X_INPUT_STATE* out_state);\n",
         "  X_RESULT GetState(uint32_t user_index, X_INPUT_STATE* out_state);\n"
-        "  // All drivers' controllers for user_index, for the SDK's dialogs.\n"
-        "  bool GetStateForUI(uint32_t user_index, X_INPUT_GAMEPAD* out_gamepad);\n",
+        "  // Every physical controller merged, for the SDK's dialogs.\n"
+        "  bool GetStateForUI(X_INPUT_GAMEPAD* out_gamepad);\n",
     ),
     (
         "src/input/input_system.cpp",
         "X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration) {\n",
-        "bool InputSystem::GetStateForUI(uint32_t user_index, X_INPUT_GAMEPAD* out_gamepad) {\n"
+        "bool InputSystem::GetStateForUI(X_INPUT_GAMEPAD* out_gamepad) {\n"
         "  bool connected = false;\n"
         "  uint16_t buttons = 0;\n"
         "  int16_t lx = 0, ly = 0;\n"
+        "  std::vector<DeviceInfo> devices;\n"
         "  for (auto& driver : drivers_) {\n"
-        "    X_INPUT_STATE state = {};\n"
-        "    if (driver->GetStateForUI(user_index, &state) != X_ERROR_SUCCESS) {\n"
-        "      continue;\n"
+        "    devices.clear();\n"
+        "    driver->EnumerateDevices(devices);\n"
+        "    for (const DeviceInfo& device : devices) {\n"
+        "      if (device.synthetic) {\n"
+        "        continue;  // keyboard/mouse emulation, NOP stand-in\n"
+        "      }\n"
+        "      X_INPUT_STATE state = {};\n"
+        "      if (driver->GetDeviceStateForUI(device.id, &state) != X_ERROR_SUCCESS) {\n"
+        "        continue;\n"
+        "      }\n"
+        "      connected = true;\n"
+        "      buttons |= static_cast<uint16_t>(state.gamepad.buttons);\n"
+        "      int16_t sx = state.gamepad.thumb_lx, sy = state.gamepad.thumb_ly;\n"
+        "      if (std::abs(int(sx)) > std::abs(int(lx))) lx = sx;\n"
+        "      if (std::abs(int(sy)) > std::abs(int(ly))) ly = sy;\n"
         "    }\n"
-        "    connected = true;\n"
-        "    buttons |= static_cast<uint16_t>(state.gamepad.buttons);\n"
-        "    int16_t sx = state.gamepad.thumb_lx, sy = state.gamepad.thumb_ly;\n"
-        "    if (std::abs(int(sx)) > std::abs(int(lx))) lx = sx;\n"
-        "    if (std::abs(int(sy)) > std::abs(int(ly))) ly = sy;\n"
         "  }\n"
         "  if (connected && out_gamepad) {\n"
         "    *out_gamepad = {};\n"
@@ -1491,19 +1502,14 @@ UNPORTED_PATCHES += [
         "        return !imgui_drawer_->GetIO().WantCaptureMouse;\n      });\n",
         "        return !imgui_drawer_->GetIO().WantCaptureMouse;\n      });\n"
         "      imgui_drawer_->SetGamepadSource([input_sys](rex::ui::ImGuiDrawer::UIGamepad* pad) {\n"
-        "        bool any = false;\n"
-        "        for (uint32_t user = 0; user < 4; ++user) {\n"
-        "          rex::input::X_INPUT_GAMEPAD gamepad = {};\n"
-        "          if (!input_sys->GetStateForUI(user, &gamepad)) {\n"
-        "            continue;\n"
-        "          }\n"
-        "          any = true;\n"
-        "          pad->buttons |= static_cast<uint16_t>(gamepad.buttons);\n"
-        "          int16_t lx = gamepad.thumb_lx, ly = gamepad.thumb_ly;\n"
-        "          if (std::abs(int(lx)) > std::abs(int(pad->lx))) pad->lx = lx;\n"
-        "          if (std::abs(int(ly)) > std::abs(int(pad->ly))) pad->ly = ly;\n"
+        "        rex::input::X_INPUT_GAMEPAD gamepad = {};\n"
+        "        if (!input_sys->GetStateForUI(&gamepad)) {\n"
+        "          return false;\n"
         "        }\n"
-        "        return any;\n"
+        "        pad->buttons = static_cast<uint16_t>(gamepad.buttons);\n"
+        "        pad->lx = gamepad.thumb_lx;\n"
+        "        pad->ly = gamepad.thumb_ly;\n"
+        "        return true;\n"
         "      });\n",
     ),
     (
@@ -1532,26 +1538,14 @@ UNPORTED_PATCHES += [
 # The app can install a filter that rewrites each physical controller's state
 # before the game sees it. Keyboard/mouse emulation is not filtered: it has
 # its own key bindings.
-UNPORTED_PATCHES += [
-    (
-        "include/rex/input/input_driver.h",
-        "  void set_is_active_callback(std::function<bool()> is_active_callback) {\n",
-        "  // False for drivers that emulate a controller (keyboard/mouse).\n"
-        "  virtual bool IsPhysicalController() const { return true; }\n\n"
-        "  void set_is_active_callback(std::function<bool()> is_active_callback) {\n",
-    ),
-    (
-        "include/rex/input/mnk/mnk_input_driver.h",
-        "  X_RESULT GetState(uint32_t user_index, X_INPUT_STATE* out_state) override;\n",
-        "  X_RESULT GetState(uint32_t user_index, X_INPUT_STATE* out_state) override;\n"
-        "  bool IsPhysicalController() const override { return false; }\n",
-    ),
+SDK_PATCHES += [
     (
         "include/rex/input/input_system.h",
         "  void SetActiveCallback(std::function<bool()> callback);\n",
         "  void SetActiveCallback(std::function<bool()> callback);\n"
         "  // Rewrites each physical controller's state before the game sees it\n"
-        "  // (button remapping). Set once at startup.\n"
+        "  // (button remapping). Set once at startup. Not applied to synthetic\n"
+        "  // devices (keyboard/mouse emulation has its own bindings).\n"
         "  using GamepadFilter = std::function<void(uint32_t user_index, X_INPUT_GAMEPAD* gamepad)>;\n"
         "  void SetGamepadFilter(GamepadFilter filter) { gamepad_filter_ = std::move(filter); }\n",
     ),
@@ -1563,12 +1557,14 @@ UNPORTED_PATCHES += [
     ),
     (
         "src/input/input_system.cpp",
-        "    if (result == X_ERROR_SUCCESS) {\n      if (first_result) {\n",
-        "    if (result == X_ERROR_SUCCESS) {\n"
-        "      if (gamepad_filter_ && driver->IsPhysicalController()) {\n"
+        "    active_devices_.Observe(user_index, id, state.gamepad);\n",
+        "    active_devices_.Observe(user_index, id, state.gamepad);\n"
+        "    if (gamepad_filter_) {\n"
+        "      const DeviceInfo* info = DeviceInfoFor(id);\n"
+        "      if (!info || !info->synthetic) {\n"
         "        gamepad_filter_(user_index, &state.gamepad);\n"
         "      }\n"
-        "      if (first_result) {\n",
+        "    }\n",
     ),
 ]
 
@@ -1714,7 +1710,7 @@ SDK_PATCHES += [
 # Change 16 now ignores controller buttons that are already held when a dialog
 # opens. With the FPS counter off the drawer detaches between dialogs and its
 # draw loop stops, so the gamepad state is reset there too.
-UNPORTED_PATCHES += [
+SDK_PATCHES += [
     (
         "src/ui/imgui_drawer.cpp",
         "  // properties.\n  ClearInput();\n",
@@ -1788,7 +1784,8 @@ SDK_PATCHES += [
 # direction do not queue anything; the queue is short (8 entries, at most
 # 100 ms old) so lag stays small.
 SDL_INPUT_HISTORY = 8
-UNPORTED_PATCHES += [
+# Ported to df2743b: the history lives in each device's ControllerState.
+SDK_PATCHES += [
     (
         "include/rex/input/sdl/sdl_input_driver.h",
         "#include <atomic>\n",
@@ -1796,16 +1793,21 @@ UNPORTED_PATCHES += [
     ),
     (
         "include/rex/input/sdl/sdl_input_driver.h",
-        "  std::array<KeystrokeState, HID_SDL_USER_COUNT> keystroke_states_;\n",
-        "  std::array<KeystrokeState, HID_SDL_USER_COUNT> keystroke_states_;\n"
-        "  // Controller states between two GetState calls (one per change of the\n"
-        "  // buttons or of the stick/trigger direction), handed out one per call.\n"
-        "  struct HistoryEntry {\n"
-        "    uint64_t ticks_ms;\n"
-        "    X_INPUT_GAMEPAD gamepad;\n"
-        "  };\n"
-        "  std::array<std::deque<HistoryEntry>, HID_SDL_USER_COUNT> state_history_;\n"
-        "  std::array<uint64_t, HID_SDL_USER_COUNT> history_signature_{};\n"
+        "    // Per pad rather than per guest user, so it survives reassignment.\n"
+        "    KeystrokeState keystroke;\n"
+        "  };\n",
+        "    // Per pad rather than per guest user, so it survives reassignment.\n"
+        "    KeystrokeState keystroke;\n"
+        "    // States between two GetDeviceState calls (one per change of the\n"
+        "    // buttons or of the stick/trigger direction), handed out one per call.\n"
+        "    std::deque<std::pair<uint64_t, X_INPUT_GAMEPAD>> history;\n"
+        "    uint64_t history_signature = 0;\n"
+        "  };\n",
+    ),
+    (
+        "include/rex/input/sdl/sdl_input_driver.h",
+        "  std::unique_lock<std::mutex> DrainAndLock();\n",
+        "  std::unique_lock<std::mutex> DrainAndLock();\n"
         "  void RecordHistoryLocked();\n",
     ),
     (
@@ -1815,25 +1817,23 @@ UNPORTED_PATCHES += [
         "  return guard;\n}\n"
         "\n"
         "void SDLInputDriver::RecordHistoryLocked() {\n"
-        "  for (size_t i = 0; i < controllers_.size(); ++i) {\n"
-        "    auto& history = state_history_[i];\n"
-        "    const auto& controller = controllers_[i];\n"
+        "  for (auto& controller : controllers_) {\n"
         "    if (!controller.sdl) {\n"
-        "      history.clear();\n"
-        "      history_signature_[i] = 0;\n"
+        "      controller.history.clear();\n"
+        "      controller.history_signature = 0;\n"
         "      continue;\n"
         "    }\n"
         "    const auto& gamepad = controller.state.gamepad;\n"
         "    const uint64_t signature =\n"
         "        uint64_t(uint16_t(gamepad.buttons)) | (AnalogToKeyfield(gamepad) << 16) | (1ull << 63);\n"
-        "    if (signature == history_signature_[i]) {\n"
+        "    if (signature == controller.history_signature) {\n"
         "      continue;\n"
         "    }\n"
-        "    history_signature_[i] = signature;\n"
-        "    if (history.size() >= " + str(SDL_INPUT_HISTORY) + ") {\n"
-        "      history.pop_front();\n"
+        "    controller.history_signature = signature;\n"
+        "    if (controller.history.size() >= " + str(SDL_INPUT_HISTORY) + ") {\n"
+        "      controller.history.pop_front();\n"
         "    }\n"
-        "    history.push_back({SDL_GetTicks(), gamepad});\n"
+        "    controller.history.emplace_back(SDL_GetTicks(), gamepad);\n"
         "  }\n"
         "}\n",
     ),
@@ -1843,19 +1843,19 @@ UNPORTED_PATCHES += [
         "  // Hand out the states between the last read and now one at a time, so a\n"
         "  // quick motion keeps every direction it passed through.\n"
         "  X_INPUT_GAMEPAD reported = controller->state.gamepad;\n"
-        "  auto& history = state_history_[user_index];\n"
+        "  auto& history = controller->history;\n"
         "  if (!is_active) {\n"
         "    history.clear();\n"
         "  } else {\n"
         "    // Older entries were never read in time (loading screen, pause):\n"
         "    // replaying them now would press buttons the player has let go.\n"
         "    const uint64_t now = SDL_GetTicks();\n"
-        "    while (!history.empty() && now - history.front().ticks_ms > 100) {\n"
+        "    while (!history.empty() && now - history.front().first > 100) {\n"
         "      history.pop_front();\n"
         "    }\n"
         "  }\n"
         "  if (is_active && !history.empty()) {\n"
-        "    reported = history.front().gamepad;\n"
+        "    reported = history.front().second;\n"
         "    history.pop_front();\n"
         "    controller->state_changed = true;\n"
         "  }\n"
@@ -1872,144 +1872,10 @@ UNPORTED_PATCHES += [
 ]
 
 
-# SDK change 25: every controller controls player 1 (merge_controllers).
-#
-# Harmony of Despair is played with one controller per PC; the game uses the
-# player whose controller pressed Start on the title screen. With several
-# controllers connected (a wheel or headset that reports as XInput, the
-# virtual pad of DS4Windows/Steam plus the real one) the one pressing Start
-# was often player 2 or 3, who has no profile signed in: after "Press Start"
-# the title screen stayed empty forever (Discord report: DualSense next to a
-# Logitech XInput device and a virtual Xbox 360 pad). With merge_controllers
-# (default on) all controllers act as player 1 and players 2-4 report no
-# controller.
-UNPORTED_PATCHES += [
-    (
-        "src/input/input_system.cpp",
-        "REXCVAR_DEFINE_BOOL(guide_button, false, \"Input\", \"Enable guide button pass-through\");\n",
-        "REXCVAR_DEFINE_BOOL(guide_button, false, \"Input\", \"Enable guide button pass-through\");\n"
-        "REXCVAR_DEFINE_BOOL(merge_controllers, true, \"Input\",\n"
-        "                    \"All connected controllers control player 1 (games for one player \"\n"
-        "                    \"per console); off: each controller is its own player\");\n"
-        "\n"
-        "namespace {\n"
-        "// Set while the merged calls below ask the drivers for a single user.\n"
-        "thread_local bool t_single_user = false;\n"
-        "bool MergeFor(uint32_t user_index) {\n"
-        "  return !t_single_user && REXCVAR_GET(merge_controllers) && user_index < 4;\n"
-        "}\n"
-        "struct SingleUser {\n"
-        "  SingleUser() { t_single_user = true; }\n"
-        "  ~SingleUser() { t_single_user = false; }\n"
-        "};\n"
-        "}  // namespace\n",
-    ),
-    (
-        "src/input/input_system.cpp",
-        "X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,\n"
-        "                                      X_INPUT_CAPABILITIES* out_caps) {\n"
-        "  SCOPE_profile_cpu_f(\"hid\");\n",
-        "X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,\n"
-        "                                      X_INPUT_CAPABILITIES* out_caps) {\n"
-        "  SCOPE_profile_cpu_f(\"hid\");\n"
-        "  if (MergeFor(user_index)) {\n"
-        "    if (user_index != 0) return X_ERROR_DEVICE_NOT_CONNECTED;\n"
-        "    SingleUser single;\n"
-        "    X_RESULT best = X_ERROR_DEVICE_NOT_CONNECTED;\n"
-        "    for (uint32_t u = 0; u < 4; ++u) {\n"
-        "      X_RESULT r = GetCapabilities(u, flags, out_caps);\n"
-        "      if (r == X_ERROR_SUCCESS) return r;\n"
-        "      if (r != X_ERROR_DEVICE_NOT_CONNECTED) best = r;\n"
-        "    }\n"
-        "    return best;\n"
-        "  }\n",
-    ),
-    (
-        "src/input/input_system.cpp",
-        "X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {\n"
-        "  SCOPE_profile_cpu_f(\"hid\");\n",
-        "X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {\n"
-        "  SCOPE_profile_cpu_f(\"hid\");\n"
-        "  if (MergeFor(user_index)) {\n"
-        "    if (user_index != 0) return X_ERROR_DEVICE_NOT_CONNECTED;\n"
-        "    SingleUser single;\n"
-        "    X_RESULT best = X_ERROR_DEVICE_NOT_CONNECTED;\n"
-        "    bool have = false;\n"
-        "    X_INPUT_STATE merged = {};\n"
-        "    uint32_t packets = 0;\n"
-        "    for (uint32_t u = 0; u < 4; ++u) {\n"
-        "      X_INPUT_STATE state = {};\n"
-        "      X_RESULT r = GetState(u, &state);\n"
-        "      if (r != X_ERROR_SUCCESS) {\n"
-        "        if (r != X_ERROR_DEVICE_NOT_CONNECTED) best = r;\n"
-        "        continue;\n"
-        "      }\n"
-        "      packets += static_cast<uint32_t>(state.packet_number);\n"
-        "      if (!have) {\n"
-        "        merged = state;\n"
-        "        have = true;\n"
-        "        continue;\n"
-        "      }\n"
-        "      auto& m = merged.gamepad;\n"
-        "      const auto& g = state.gamepad;\n"
-        "      m.buttons = static_cast<uint16_t>(m.buttons) | static_cast<uint16_t>(g.buttons);\n"
-        "      m.left_trigger = std::max(m.left_trigger, g.left_trigger);\n"
-        "      m.right_trigger = std::max(m.right_trigger, g.right_trigger);\n"
-        "      auto pick = [](int16_t a, int16_t b) -> int16_t {\n"
-        "        return std::abs(int(a)) >= std::abs(int(b)) ? a : b;\n"
-        "      };\n"
-        "      m.thumb_lx = pick(m.thumb_lx, g.thumb_lx);\n"
-        "      m.thumb_ly = pick(m.thumb_ly, g.thumb_ly);\n"
-        "      m.thumb_rx = pick(m.thumb_rx, g.thumb_rx);\n"
-        "      m.thumb_ry = pick(m.thumb_ry, g.thumb_ry);\n"
-        "    }\n"
-        "    if (!have) return best;\n"
-        "    // Changes whenever any controller's packet number changes.\n"
-        "    merged.packet_number = packets;\n"
-        "    if (out_state) *out_state = merged;\n"
-        "    return X_ERROR_SUCCESS;\n"
-        "  }\n",
-    ),
-    (
-        "src/input/input_system.cpp",
-        "  SCOPE_profile_cpu_f(\"hid\");\n\n  bool any_connected = false;\n"
-        "  for (auto& driver : drivers_) {\n    X_RESULT result = driver->SetState(user_index, vibration);\n",
-        "  SCOPE_profile_cpu_f(\"hid\");\n"
-        "  if (MergeFor(user_index)) {\n"
-        "    if (user_index != 0) return X_ERROR_DEVICE_NOT_CONNECTED;\n"
-        "    SingleUser single;\n"
-        "    X_RESULT best = X_ERROR_DEVICE_NOT_CONNECTED;\n"
-        "    for (uint32_t u = 0; u < 4; ++u) {\n"
-        "      X_RESULT r = SetState(u, vibration);\n"
-        "      if (r == X_ERROR_SUCCESS || best == X_ERROR_DEVICE_NOT_CONNECTED) best = r;\n"
-        "    }\n"
-        "    return best;\n"
-        "  }\n"
-        "\n  bool any_connected = false;\n"
-        "  for (auto& driver : drivers_) {\n    X_RESULT result = driver->SetState(user_index, vibration);\n",
-    ),
-    (
-        "src/input/input_system.cpp",
-        "                                   X_INPUT_KEYSTROKE* out_keystroke) {\n"
-        "  SCOPE_profile_cpu_f(\"hid\");\n",
-        "                                   X_INPUT_KEYSTROKE* out_keystroke) {\n"
-        "  SCOPE_profile_cpu_f(\"hid\");\n"
-        "  if (MergeFor(user_index)) {\n"
-        "    if (user_index != 0) return X_ERROR_DEVICE_NOT_CONNECTED;\n"
-        "    SingleUser single;\n"
-        "    X_RESULT best = X_ERROR_DEVICE_NOT_CONNECTED;\n"
-        "    for (uint32_t u = 0; u < 4; ++u) {\n"
-        "      X_RESULT r = GetKeystroke(u, flags, out_keystroke);\n"
-        "      if (r == X_ERROR_SUCCESS) {\n"
-        "        if (out_keystroke) out_keystroke->user_index = 0;\n"
-        "        return r;\n"
-        "      }\n"
-        "      if (r != X_ERROR_DEVICE_NOT_CONNECTED) best = r;\n"
-        "    }\n"
-        "    return best;\n"
-        "  }\n",
-    ),
-]
+# SDK change 25 (merge_controllers: every controller controls player 1) is not
+# needed since df2743b: the SDK has a SharedAssignment policy, which
+# src/controller_remap.cpp selects when merge_controllers is on (default).
+
 
 # SDK change 26: controls stayed dead after closing the last window (F6 menu)
 # when nothing else was on screen; F2 (FPS counter) brought them back.
@@ -2021,8 +1887,8 @@ UNPORTED_PATCHES += [
 SDK_PATCHES += [
     (
         "src/ui/imgui_drawer.cpp",
-        "  // properties.\n  ClearInput();\n}\n",
-        "  // properties.\n  ClearInput();\n"
+        "  // properties.\n  ClearInput();\n  gamepad_fed_ = false;\n}\n",
+        "  // properties.\n  ClearInput();\n  gamepad_fed_ = false;\n"
         "  // No dialog is left to take input; Draw() no longer runs to say so.\n"
         "  mouse_dialog_count_ = 0;\n}\n",
     ),
@@ -2090,7 +1956,7 @@ UNPORTED_PATCHES += [
 # counting until the next frame drew windows - change 26 fixed this for the
 # last window, this does it for every one. Also logged now: when input to the
 # game switches off and on, and focus changes, to see the cause in a log.
-UNPORTED_PATCHES += [
+SDK_PATCHES += [
     (
         "src/ui/imgui_drawer.cpp",
         "  REXLOG_INFO(\"ImGui dialog closed ({} open)\", dialogs_.size());\n"
@@ -2112,8 +1978,9 @@ UNPORTED_PATCHES += [
         "src/input/sdl/sdl_input_driver.cpp",
         "  if ((is_active != controller->is_active) || (is_active && controller->state_changed)) {\n",
         "  if (is_active != controller->is_active) {\n"
-        "    REXLOG_INFO(\"SDL: controller input to the game {} (user {})\",\n"
-        "                is_active ? \"on\" : \"off: a window takes the input\", user_index);\n"
+        "    REXLOG_INFO(\"SDL: controller input to the game {} (device {})\",\n"
+        "                is_active ? \"on\" : \"off: a window takes the input\",\n"
+        "                static_cast<uint64_t>(id));\n"
         "  }\n"
         "  if ((is_active != controller->is_active) || (is_active && controller->state_changed)) {\n",
     ),

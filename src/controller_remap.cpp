@@ -5,13 +5,19 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <string>
 
 #include <rex/cvar.h>
+#include <rex/input/device_assignment.h>
 #include <rex/input/input_system.h>
 #include <rex/logging.h>
 #include <rex/runtime.h>
 
+// Was SDK change 25; the SDK's SharedAssignment does the same since df2743b.
+REXCVAR_DEFINE_BOOL(merge_controllers, true, "Input",
+                    "All connected controllers control player 1 (games for one player "
+                    "per console); off: each controller is its own player");
 REXCVAR_DEFINE_STRING(remap_a, "A", "Input/Controller remap", "Physical button for the game's A");
 REXCVAR_DEFINE_STRING(remap_b, "B", "Input/Controller remap", "Physical button for the game's B");
 REXCVAR_DEFINE_STRING(remap_x, "X", "Input/Controller remap", "Physical button for the game's X");
@@ -144,8 +150,8 @@ void ResetControllerRemap() {
   ReloadControllerRemap();
 }
 
-// SetGamepadFilter comes from SDK change 17, which is not ported to the
-// per-device input system of df2743b yet: without it, remapping is off.
+// SetGamepadFilter comes from SDK change 17 (scripts/build.py); with an SDK
+// without it, remapping is off instead of failing the build.
 template <typename Input>
 bool InstallFilter(Input* input) {
   if constexpr (requires { input->SetGamepadFilter(&Filter); }) {
@@ -161,6 +167,12 @@ void InstallControllerRemap(rex::Runtime* runtime) {
   auto* input = runtime ? static_cast<rex::input::InputSystem*>(runtime->input_system()) : nullptr;
   if (!input) {
     return;
+  }
+  // One controller per PC: with several connected (a virtual pad from
+  // Steam/DS4Windows next to the real one, a wheel), the one pressing Start
+  // must be player 1, who has the signed-in profile.
+  if (REXCVAR_GET(merge_controllers)) {
+    input->SetDeviceAssignment(std::make_unique<rex::input::SharedAssignment>());
   }
   if (!InstallFilter(input)) {
     REXLOG_WARN("Controller remapping is not available with this SDK (remap_* ignored)");

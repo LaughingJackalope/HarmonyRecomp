@@ -197,6 +197,12 @@ class HarmonyrecompApp : public rex::ReXApp {
       w->AddInputListener(&mac_keys_, 0);
     }
 #endif
+    // Since df2743b the SDK binds its achievements overlay to F7 and registers
+    // it first, so it took F7 from the 30/60 switch below (the first matching
+    // bind wins). Move it to F8 unless the player chose a key for it.
+    if (rex::cvar::GetFlagByName("bind_achievements") == "F7") {
+      rex::cvar::SetFlagByName("bind_achievements", "F8");
+    }
     // 30/60 FPS for speedruns (glitches that need the console's frame drops).
     rex::ui::RegisterBind("bind_fps_30_60", "F7", "Switch frame rate limit 30/60", [] {
       const bool at_30 =

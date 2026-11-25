@@ -129,6 +129,7 @@ Settings live in `harmonyrecomp.toml` next to the exe (copied there on the first
 | F6 | Settings menu: graphics, controls, online, saves ("Save" writes `harmonyrecomp.toml`); its title shows your HarmonyRecomp version |
 | F11 | Borderless fullscreen on/off (remembered, like the window size) |
 | F7 | Frame rate limit 30 / 60 FPS (for speedruns: glitches that need the console's frame drops) |
+| F8 | SDK achievements overlay (the SDK's default is F7, which HarmonyRecomp keeps for the frame rate limit) |
 | `^` | Log console |
 
 ### Controls
