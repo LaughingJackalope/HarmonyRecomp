@@ -4,6 +4,10 @@
     python3 scripts/build.py              # build first
     python3 scripts/package_macos.py      # -> dist/HarmonyRecomp.app, dist/HarmonyRecomp-macos-arm64.zip
 
+scripts/install_macos.command runs it on the player's Mac (--no-zip) after
+building there from their own game file; that is the version to share
+(scripts/package_macos_installer.py).
+
 The app CONTAINS THE GAME: the recompiled code and the extracted game data
 from your own copy. It is for your own Macs only. Keep it in private storage
 and never share it (see the README: never share game/, assets/, generated/ or
@@ -12,7 +16,9 @@ builds made from them).
 Layout:
   Contents/MacOS/harmonyrecomp           executable
   Contents/MacOS/*.dylib                 SDK runtime, GPU plugin, character modules
+  Contents/MacOS/dlc_packages.txt        DLC packages that were part of the build
   Contents/Resources/assets/             game data (from assets/, without DLC)
+  Contents/Resources/dlc/                those DLC packages (installed at first start)
   Contents/Resources/vulkan/lib/         Vulkan loader, MoltenVK, SPIRV-Tools
   Contents/Resources/vulkan/share/vulkan/icd.d/MoltenVK_icd.json
   Contents/Resources/harmonyrecomp.toml  default settings, copied on first start
@@ -35,7 +41,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 APP_NAME = "HarmonyRecomp"
 BUNDLE_ID = "io.github.harmonyrecomp.macos"
-# Where Homebrew's molten-vk keeps its loader manifest (it points at ../../../lib).
+# The build stages the SDK's Vulkan runtime next to the executable (vulkan/);
+# Homebrew's copies are the fallback on the developer's Mac.
 ICD_CANDIDATES = [
     Path("/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json"),
     Path("/usr/local/etc/vulkan/icd.d/MoltenVK_icd.json"),
@@ -69,7 +76,7 @@ Install
 3. Start it. It opens fullscreen; Ctrl+Cmd+F switches to a window.
 
 Keys: F6 settings menu (controller works there), F2 FPS counter,
-Ctrl+Cmd+F fullscreen. On a Mac keyboard F-keys may need fn (fn+F6).
+F7 30/60 FPS, F8 achievements, Ctrl+Cmd+F fullscreen. On a Mac keyboard F-keys may need fn (fn+F6).
 
 Where things are
 ----------------
@@ -96,13 +103,14 @@ def first_existing(paths, what):
 
 
 def copy_tree_files(src: Path, dst: Path):
+    """Copy the files of src; symlinks become the files they point to (the
+    SDK's staged Vulkan libraries can be links into Homebrew)."""
     dst.mkdir(parents=True, exist_ok=True)
     for item in src.iterdir():
-        target = dst / item.name
-        if item.is_symlink():
-            target.symlink_to(item.readlink())
-        elif item.is_file():
-            shutil.copy2(item, target)
+        if item.is_file():  # follows links; a broken link is skipped
+            target = dst / item.name
+            shutil.copyfile(item, target)
+            target.chmod(0o755)
 
 
 def main() -> int:
@@ -111,6 +119,8 @@ def main() -> int:
     parser.add_argument("--build-dir", type=Path,
                         default=ROOT / "out" / "build" / "mac-arm64-release")
     parser.add_argument("--assets", type=Path, default=ROOT / "assets")
+    parser.add_argument("--dlc-dir", type=Path, default=ROOT / "dlc",
+                        help="folder with the DLC packages the build used")
     parser.add_argument("--out", type=Path, default=ROOT / "dist")
     parser.add_argument("--no-zip", action="store_true", help="only create the .app")
     args = parser.parse_args()
@@ -152,7 +162,8 @@ def main() -> int:
     for needed in ("libvulkan.1.dylib", "libMoltenVK.dylib"):
         if not (vulkan / "lib" / needed).exists():
             sys.exit(f"error: {needed} missing from {staged}")
-    icd_src = first_existing(ICD_CANDIDATES, "MoltenVK_icd.json")
+    icd_src = first_existing([build / "vulkan" / "share" / "vulkan" / "icd.d" / "MoltenVK_icd.json"]
+                             + ICD_CANDIDATES, "MoltenVK_icd.json")
     icd = json.loads(icd_src.read_text())
     icd["ICD"]["library_path"] = "../../../lib/libMoltenVK.dylib"
     icd_dir = vulkan / "share" / "vulkan" / "icd.d"
@@ -163,13 +174,33 @@ def main() -> int:
     shutil.copytree(assets, resources / "assets", ignore=shutil.ignore_patterns("dlc", ".*"))
     settings = (ROOT / "harmonyrecomp.toml").read_text() + APP_SETTINGS
     (resources / "harmonyrecomp.toml").write_text(settings)
+    # DLC: only the packages whose code this build recompiled (src/dlc.cpp).
+    dlc_list = build / "dlc_packages.txt"
+    if dlc_list.is_file():
+        shutil.copy2(dlc_list, macos / dlc_list.name)
+        # "<name>\t<id>" lines; names can contain spaces (scripts/build.py).
+        names = [line.split("\t")[0].rstrip() for line in dlc_list.read_text().splitlines()
+                 if line.strip()]
+        found = [args.dlc_dir / n for n in names if (args.dlc_dir / n).is_file()]
+        if found:
+            (resources / "dlc").mkdir()
+            for package in found:
+                shutil.copy2(package, resources / "dlc" / package.name)
+            print(f"      DLC: {len(found)} package(s)")
+        if len(found) < len(names):
+            print(f"      warning: {len(names) - len(found)} DLC package(s) of the build not found "
+                  f"in {args.dlc_dir}")
 
     version = "dev"
-    try:
-        version = subprocess.run(["git", "-C", str(ROOT), "describe", "--tags", "--always"],
-                                 capture_output=True, text=True, check=True).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
-        pass
+    release = ROOT.parent / "release.txt"  # installer payload (package_macos_installer.py)
+    if release.is_file():
+        version = release.read_text().strip() or version
+    else:
+        try:
+            version = subprocess.run(["git", "-C", str(ROOT), "describe", "--tags", "--always"],
+                                     capture_output=True, text=True, check=True).stdout.strip()
+        except (OSError, subprocess.CalledProcessError):
+            pass
     with open(contents / "Info.plist", "wb") as f:
         plistlib.dump({
             "CFBundleName": APP_NAME,

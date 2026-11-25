@@ -69,11 +69,15 @@ The Windows build also runs under Proton; since v0.6.0 online play works there t
 
 Native arm64 build through ReXGlue's macOS support (MoltenVK). Tested on an M2: full speed (60 FPS) windowed and fullscreen, controller, sound and saves. Progress and known gaps: [macOS tracking issue](https://github.com/LaughingJackalope/HarmonyRecomp/issues/1).
 
+**Installer (no game inside, can be shared):** `HarmonyRecomp-macos-installer.zip` (66 MB) holds the prebuilt SDK, this project's source, CMake and Ninja. Unpack it and run `bash "Install HarmonyRecomp.command"` in Terminal (see its `READ ME FIRST.txt`). It builds the game on that Mac from your own game file with Apple's Command Line Tools (it offers to install them) and puts `HarmonyRecomp.app` into Applications. Developers create the zip with `python3 scripts/package_macos_installer.py --cmake cmake-<version>-macos-universal.tar.gz --ninja ninja-mac.zip` after building the SDK.
+
+**By hand:**
+
 1. `brew install cmake ninja vulkan-loader molten-vk` (Apple's Command Line Tools provide the compiler).
 2. Put your game file into `game/` and run `python3 scripts/build.py`. The game is in `out/build/mac-arm64-release/` (`./harmonyrecomp`).
 3. Optional: `python3 scripts/package_macos.py` wraps it into `dist/HarmonyRecomp.app` and a zip with install notes, for your other Macs. **That app contains the game: keep it private, never share it.**
 
-Ctrl+Cmd+F toggles fullscreen (macOS takes F11). Inside the app, settings and logs are in `~/Library/Application Support/HarmonyRecomp`; saves are in `~/.local/share/harmonyrecomp`. Not yet on macOS: button remapping, controller in the game's system dialogs.
+Ctrl+Cmd+F toggles fullscreen (macOS takes F11). Inside the app, settings and logs are in `~/Library/Application Support/HarmonyRecomp`; saves are in `~/.local/share/harmonyrecomp`. Known gap: glitches with the 30 FPS limit (F7, [#12](https://github.com/LaughingJackalope/HarmonyRecomp/issues/12)).
 
 The rest of this page is for building by hand and for developers.
 
